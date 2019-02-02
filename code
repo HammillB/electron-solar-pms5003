@@ -1,0 +1,76 @@
+//Compile for the electron in WEB IDE.  Put into setup mode. Flash over usb   particle flash --serial firmware.bin
+// Variables
+//long pm10 = 0;
+long pm25;
+//long pm100 = 0;
+int SLEEP = D6;  //Use the builtin LED on pin 7 to determine when it is awake and asleep. off = asleep, on = awake
+int numSleepMins = 19; // Number of minutes to sleep
+uint8_t wake[] = { 0x42, 0x4D, 0xE4, 0x00, 0x01, 0x01, 0x74 }; // command to put sensor to sleep.
+uint8_t sleep[] = { 0x42, 0x4D, 0xE4, 0x00, 0x00, 0x01, 0x73 }; //command to wake sensor up.
+FuelGauge fuel; // A FuelGauge named 'fuel' for checking on the battery state
+
+ void setup() {
+ // Serial.begin(9600);
+  Serial1.begin(9600);
+  pinMode(SLEEP, OUTPUT);
+   //Particle.function("batt", batteryStatus);
+  }
+
+ void loop() {
+     digitalWrite(SLEEP, HIGH);
+     delay(1000); // delay before telling sensor to wake up
+     Serial1.write(wake, sizeof(wake));
+     
+    delay(15000); // delay before taking a reading
+    //Serial.print("Awake");
+     
+  int index = 0;
+  char value;
+  char previousValue;
+   while (Serial1.available()) {
+    value = Serial1.read();
+    if ((index == 0 && value != 0x42) || (index == 1 && value != 0x4d)){
+     // Serial.println("Cannot find the data header.");
+      break;
+    }
+     if (index == 4 || index == 6 || index == 8 || index == 10 || index == 12 || index == 14) {
+      previousValue = value;
+    }
+   // else if (index == 5){
+     // pm10 = 256 * previousValue + value;
+      //Serial.print("{ ");
+      //Serial.print("\"pm10\": ");
+      //Serial.print(pm10);
+      //Serial.print(", ");
+    //}
+    else if (index == 7){
+      pm25 = 256 * previousValue + value;
+     // Serial.print("\"pm25\": ");
+    //  Serial.print(pm25);
+    //  Serial.print(", ");
+    }
+   // else if (index == 9){
+     // pm100 = 256 * previousValue + value;
+      //Serial.print("\"pm100\": ");
+      //Serial.print(pm100);
+    //} 
+    else if (index > 15) {
+      break;
+    }
+    index++;
+  }
+  while(Serial1.available()) Serial1.read();
+  //Serial.println(" }");
+
+//Serial.println( fuel.getSoC() );
+   //Particle.publish("pm25", String(pm25) + " %" + String::format("%.2f",fuel.getSoC()), PRIVATE);
+    Particle.publish("pm25", String(pm25), PRIVATE);
+     Particle.publish("%", String::format("%.2f",fuel.getSoC()), PRIVATE);
+    delay(2000);
+    
+     Serial1.write(sleep, sizeof(sleep));
+    // Serial.print("Asleep");
+   digitalWrite(SLEEP, LOW);
+    System.sleep(D0, RISING, numSleepMins*60, SLEEP_NETWORK_STANDBY);
+  
+} 

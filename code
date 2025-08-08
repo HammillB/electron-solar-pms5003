@@ -69,7 +69,7 @@ int readPmSensor() {
 
     // Read the data frame from the serial port.
     int index = 0;
-    byte frameBuffer[MAX_FRAME_LENGTH];
+    char frameBuffer[MAX_FRAME_LENGTH];
 
     // We need to find the start of the frame.
     // Read bytes until we see the first header byte or timeout.

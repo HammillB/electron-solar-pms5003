@@ -1,76 +1,102 @@
-//Compile for the electron in WEB IDE.  Put into setup mode. Flash over usb   particle flash --serial firmware.bin
-// Variables
-//long pm10 = 0;
-long pm25;
-//long pm100 = 0;
-int SLEEP = D6;  //Use the builtin LED on pin 7 to determine when it is awake and asleep. off = asleep, on = awake
-int numSleepMins = 19; // Number of minutes to sleep
-uint8_t wake[] = { 0x42, 0x4D, 0xE4, 0x00, 0x01, 0x01, 0x74 }; // command to put sensor to sleep.
-uint8_t sleep[] = { 0x42, 0x4D, 0xE4, 0x00, 0x00, 0x01, 0x73 }; //command to wake sensor up.
-FuelGauge fuel; // A FuelGauge named 'fuel' for checking on the battery state
+// Reference for the sensor protocol can be found here:
+// https://cdn-shop.adafruit.com/product-files/3686/plantower-pms5003-manual_v2-3.pdf
 
- void setup() {
- // Serial.begin(9600);
-  Serial1.begin(9600);
-  pinMode(SLEEP, OUTPUT);
-   //Particle.function("batt", batteryStatus);
-  }
+// Define the pin for the status LED. It's HIGH when the device is awake.
+const int PIN_STATUS_LED = D6;
 
- void loop() {
-     digitalWrite(SLEEP, HIGH);
-     delay(1000); // delay before telling sensor to wake up
-     Serial1.write(wake, sizeof(wake));
-     
-    delay(15000); // delay before taking a reading
-    //Serial.print("Awake");
-     
-  int index = 0;
-  char value;
-  char previousValue;
-   while (Serial1.available()) {
-    value = Serial1.read();
-    if ((index == 0 && value != 0x42) || (index == 1 && value != 0x4d)){
-     // Serial.println("Cannot find the data header.");
-      break;
-    }
-     if (index == 4 || index == 6 || index == 8 || index == 10 || index == 12 || index == 14) {
-      previousValue = value;
-    }
-   // else if (index == 5){
-     // pm10 = 256 * previousValue + value;
-      //Serial.print("{ ");
-      //Serial.print("\"pm10\": ");
-      //Serial.print(pm10);
-      //Serial.print(", ");
-    //}
-    else if (index == 7){
-      pm25 = 256 * previousValue + value;
-     // Serial.print("\"pm25\": ");
-    //  Serial.print(pm25);
-    //  Serial.print(", ");
-    }
-   // else if (index == 9){
-     // pm100 = 256 * previousValue + value;
-      //Serial.print("\"pm100\": ");
-      //Serial.print(pm100);
-    //} 
-    else if (index > 15) {
-      break;
-    }
-    index++;
-  }
-  while(Serial1.available()) Serial1.read();
-  //Serial.println(" }");
+// Define the number of minutes the device will sleep between readings.
+const int SLEEP_DURATION_MINUTES = 19;
 
-//Serial.println( fuel.getSoC() );
-   //Particle.publish("pm25", String(pm25) + " %" + String::format("%.2f",fuel.getSoC()), PRIVATE);
-    Particle.publish("pm25", String(pm25), PRIVATE);
-     Particle.publish("%", String::format("%.2f",fuel.getSoC()), PRIVATE);
-    delay(2000);
+// Sensor communication commands
+const uint8_t CMD_WAKE[] = { 0x42, 0x4D, 0xE4, 0x00, 0x01, 0x01, 0x74 };
+const uint8_t CMD_SLEEP[] = { 0x42, 0x4D, 0xE4, 0x00, 0x00, 0x01, 0x73 };
+
+// Sensor data frame structure constants
+const uint8_t FRAME_HEADER_1 = 0x42;
+const uint8_t FRAME_HEADER_2 = 0x4D;
+const int PM25_HIGH_BYTE_INDEX = 6;
+const int PM25_LOW_BYTE_INDEX = 7;
+const int MAX_FRAME_LENGTH = 32; // PMS5003 data frame is 32 bytes long
+
+// A FuelGauge object for monitoring the battery state.
+FuelGauge fuel;
+
+// Forward declaration for our new sensor reading function
+int readPmSensor();
+
+void setup() {
+    // Start the hardware serial port for the sensor.
+    Serial1.begin(9600);
+
+    // Set up the status LED pin.
+    pinMode(PIN_STATUS_LED, OUTPUT);
+}
+
+void loop() {
+    // Turn on the status LED to indicate the device is awake.
+    digitalWrite(PIN_STATUS_LED, HIGH);
+
+    // Read the PM2.5 value from the sensor.
+    int pm25 = readPmSensor();
+
+    // If the reading is valid (non-negative), publish the data.
+    if (pm25 >= 0) {
+        float batterySoC = fuel.getSoC();
+        Particle.publish("pm25", String(pm25), PRIVATE);
+        Particle.publish("batterySoC", String::format("%.2f", batterySoC), PRIVATE);
+    }
+
+    // Put the sensor to sleep.
+    Serial1.write(CMD_SLEEP, sizeof(CMD_SLEEP));
+    delay(1000); // Give the sensor time to process the command.
+
+    // Turn off the status LED.
+    digitalWrite(PIN_STATUS_LED, LOW);
+
+    // Put the Particle device to sleep to conserve battery.
+    // It will wake up on a rising edge on D0 or after the timeout.
+    System.sleep(D0, RISING, SLEEP_DURATION_MINUTES * 60, SLEEP_NETWORK_STANDBY);
+}
+
+/**
+ * @brief Wakes the PM sensor, reads a data frame, and extracts the PM2.5 value.
+ * @return The PM2.5 reading, or -1 if an error occurred.
+ */
+int readPmSensor() {
+    // Wake the sensor up.
+    Serial1.write(CMD_WAKE, sizeof(CMD_WAKE));
+    delay(15000); // Wait for the sensor to warm up and stabilize.
+
+    // Read the data frame from the serial port.
+    int index = 0;
+    byte frameBuffer[MAX_FRAME_LENGTH];
+
+    // We need to find the start of the frame.
+    // Read bytes until we see the first header byte or timeout.
+    unsigned long startTime = millis();
+    while (Serial1.peek() != FRAME_HEADER_1) {
+        Serial1.read(); // Discard byte
+        if (millis() - startTime > 2000) { // 2-second timeout
+            return -1; // Error: Timed out waiting for header
+        }
+    }
+
+    // Now, try to read the full frame.
+    if (Serial1.available() >= MAX_FRAME_LENGTH) {
+        Serial1.readBytes(frameBuffer, MAX_FRAME_LENGTH);
+
+        // Verify the frame header.
+        if (frameBuffer[0] == FRAME_HEADER_1 && frameBuffer[1] == FRAME_HEADER_2) {
+            // The PM2.5 value is a 16-bit integer (big-endian).
+            int pm25 = (frameBuffer[PM25_HIGH_BYTE_INDEX] << 8) | frameBuffer[PM25_LOW_BYTE_INDEX];
+            return pm25;
+        }
+    }
+
+    // Clear the serial buffer of any remaining data to prevent issues on the next read.
+    while (Serial1.available()) {
+        Serial1.read();
+    }
     
-     Serial1.write(sleep, sizeof(sleep));
-    // Serial.print("Asleep");
-   digitalWrite(SLEEP, LOW);
-    System.sleep(D0, RISING, numSleepMins*60, SLEEP_NETWORK_STANDBY);
-  
-} 
+    return -1; // Error: Frame not found or incomplete
+}

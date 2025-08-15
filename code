@@ -1,76 +1,109 @@
 //Compile for the electron in WEB IDE.  Put into setup mode. Flash over usb   particle flash --serial firmware.bin
 // Variables
 //long pm10 = 0;
-long pm25;
+uint16_t pm25;
 //long pm100 = 0;
 int SLEEP = D6;  //Use the builtin LED on pin 7 to determine when it is awake and asleep. off = asleep, on = awake
 int numSleepMins = 19; // Number of minutes to sleep
-uint8_t wake[] = { 0x42, 0x4D, 0xE4, 0x00, 0x01, 0x01, 0x74 }; // command to put sensor to sleep.
-uint8_t sleep[] = { 0x42, 0x4D, 0xE4, 0x00, 0x00, 0x01, 0x73 }; //command to wake sensor up.
+const uint8_t PMS_CMD_WAKE[] = { 0x42, 0x4D, 0xE4, 0x00, 0x01, 0x01, 0x74 }; // command to wake sensor up.
+const uint8_t PMS_CMD_SLEEP[] = { 0x42, 0x4D, 0xE4, 0x00, 0x00, 0x01, 0x73 }; // command to put sensor to sleep.
 FuelGauge fuel; // A FuelGauge named 'fuel' for checking on the battery state
 
- void setup() {
- // Serial.begin(9600);
+const unsigned long PMS_WAKE_DELAY_MS = 1000;
+const unsigned long PMS_SETTLE_MS = 15000;
+const unsigned long READ_TIMEOUT_MS = 2000;
+const unsigned long PUBLISH_DELAY_MS = 2000;
+const int MAX_READ_ATTEMPTS = 3;
+
+static bool readPmsFrame(Stream &serial, uint16_t &pm25Out, unsigned long timeoutMs) {
+  unsigned long start = millis();
+  int state = 0; // 0: looking for 0x42, 1: looking for 0x4D, 2: header found
+
+  while (millis() - start < timeoutMs) {
+    if (serial.available()) {
+      int byteRead = serial.read();
+      if (state == 0) {
+        state = (byteRead == 0x42) ? 1 : 0;
+      } else if (state == 1) {
+        if (byteRead == 0x4D) {
+          state = 2;
+          break;
+        } else {
+          state = 0;
+        }
+      }
+    }
+  }
+  if (state != 2) {
+    return false; // header not found within timeout
+  }
+
+  uint8_t buf[30]; // remainder of frame after 0x42 0x4D
+  size_t expected = sizeof(buf);
+  size_t got = serial.readBytes(reinterpret_cast<char *>(buf), expected);
+  if (got != expected) {
+    return false;
+  }
+
+  uint16_t frameLen = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
+  if (frameLen < 28) {
+    return false;
+  }
+
+  uint32_t sum = 0x42 + 0x4D; // include header in checksum
+  for (int i = 0; i < 28; i++) {
+    sum += buf[i];
+  }
+  uint16_t expectedChecksum = static_cast<uint16_t>(sum & 0xFFFF);
+  uint16_t receivedChecksum = (static_cast<uint16_t>(buf[28]) << 8) | buf[29];
+  if (expectedChecksum != receivedChecksum) {
+    return false;
+  }
+
+  // PM2.5 (ATM) is bytes 12..13 from start-of-frame; in buf it's indices 10..11
+  uint16_t pm25Atm = (static_cast<uint16_t>(buf[10]) << 8) | buf[11];
+  pm25Out = pm25Atm;
+  return true;
+}
+
+  void setup() {
+  // Serial.begin(9600);
   Serial1.begin(9600);
+  Serial1.setTimeout(READ_TIMEOUT_MS);
   pinMode(SLEEP, OUTPUT);
    //Particle.function("batt", batteryStatus);
   }
 
- void loop() {
-     digitalWrite(SLEEP, HIGH);
-     delay(1000); // delay before telling sensor to wake up
-     Serial1.write(wake, sizeof(wake));
-     
-    delay(15000); // delay before taking a reading
-    //Serial.print("Awake");
-     
-  int index = 0;
-  char value;
-  char previousValue;
-   while (Serial1.available()) {
-    value = Serial1.read();
-    if ((index == 0 && value != 0x42) || (index == 1 && value != 0x4d)){
-     // Serial.println("Cannot find the data header.");
-      break;
-    }
-     if (index == 4 || index == 6 || index == 8 || index == 10 || index == 12 || index == 14) {
-      previousValue = value;
-    }
-   // else if (index == 5){
-     // pm10 = 256 * previousValue + value;
-      //Serial.print("{ ");
-      //Serial.print("\"pm10\": ");
-      //Serial.print(pm10);
-      //Serial.print(", ");
-    //}
-    else if (index == 7){
-      pm25 = 256 * previousValue + value;
-     // Serial.print("\"pm25\": ");
-    //  Serial.print(pm25);
-    //  Serial.print(", ");
-    }
-   // else if (index == 9){
-     // pm100 = 256 * previousValue + value;
-      //Serial.print("\"pm100\": ");
-      //Serial.print(pm100);
-    //} 
-    else if (index > 15) {
-      break;
-    }
-    index++;
-  }
-  while(Serial1.available()) Serial1.read();
-  //Serial.println(" }");
+  void loop() {
+    digitalWrite(SLEEP, HIGH);
+    delay(PMS_WAKE_DELAY_MS); // delay before telling sensor to wake up
+    Serial1.write(PMS_CMD_WAKE, sizeof(PMS_CMD_WAKE));
 
-//Serial.println( fuel.getSoC() );
-   //Particle.publish("pm25", String(pm25) + " %" + String::format("%.2f",fuel.getSoC()), PRIVATE);
-    Particle.publish("pm25", String(pm25), PRIVATE);
-     Particle.publish("%", String::format("%.2f",fuel.getSoC()), PRIVATE);
-    delay(2000);
-    
-     Serial1.write(sleep, sizeof(sleep));
-    // Serial.print("Asleep");
-   digitalWrite(SLEEP, LOW);
+    delay(PMS_SETTLE_MS); // delay before taking a reading
+
+    uint16_t pm25Reading = 0;
+    bool success = false;
+    for (int attempt = 0; attempt < MAX_READ_ATTEMPTS && !success; attempt++) {
+      success = readPmsFrame(Serial1, pm25Reading, READ_TIMEOUT_MS);
+    }
+
+    while (Serial1.available()) Serial1.read();
+
+    float soc = fuel.getSoC();
+
+    if (success) {
+      pm25 = pm25Reading;
+      String payload = String::format("{\"pm25\":%u,\"soc\":%.2f}", pm25, soc);
+      Particle.publish("telemetry", payload, PRIVATE);
+    } else {
+      String payload = String::format("{\"error\":\"pms-read-failed\",\"soc\":%.2f}", soc);
+      Particle.publish("telemetry", payload, PRIVATE);
+    }
+
+    delay(PUBLISH_DELAY_MS);
+
+    Serial1.write(PMS_CMD_SLEEP, sizeof(PMS_CMD_SLEEP));
+    digitalWrite(SLEEP, LOW);
     System.sleep(D0, RISING, numSleepMins*60, SLEEP_NETWORK_STANDBY);
-  
+
 } 
